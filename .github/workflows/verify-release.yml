@@ -1,0 +1,130 @@
+name: Verify GoatCounter Release on GitHub
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to verify
+        required: false
+        default: v2.7.0
+permissions:
+  contents: read
+concurrency:
+  group: goatcounter-release-verification
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve tag
+        run: |
+          TAG="${{ github.event.inputs.tag }}"
+          if [ -z "$TAG" ]; then TAG="$(gh release view --json tagName --jq .tagName)"; fi
+          echo "RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
+
+      - name: Download exact Release asset on runner
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ASSET_NAME="community.lazycat.app.goatcounter-${RELEASE_TAG}.lpk"
+          echo "ASSET_NAME=$ASSET_NAME" >> "$GITHUB_ENV"
+          gh release view "$RELEASE_TAG" --json tagName,assets > release-metadata.json
+          gh release download "$RELEASE_TAG" --pattern "$ASSET_NAME" --dir verify-pkg
+
+      - name: Verify package contents
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, re, tarfile, yaml
+
+          tag = os.environ['RELEASE_TAG']
+          name = os.environ['ASSET_NAME']
+          pkg = __import__('pathlib').Path('verify-pkg') / name
+          assert pkg.is_file(), pkg
+
+          h = hashlib.sha256()
+          with pkg.open('rb') as fh:
+              for chunk in iter(lambda: fh.read(1 << 20), b''):
+                  h.update(chunk)
+
+          with tarfile.open(pkg, 'r:') as package:
+              members = package.getnames()
+              for required in ('manifest.yml', 'package.yml', 'content.tar', 'icon.png'):
+                  assert required in members, (required, members)
+
+              info = yaml.safe_load(package.extractfile('package.yml').read())
+              assert info['package'] == 'community.lazycat.app.goatcounter', info['package']
+              assert info['name'] == 'GoatCounter', info['name']
+              assert info['version'] == tag.lstrip('v'), (info['version'], tag)
+              assert info['license'] == 'EUPL-1.2', info['license']
+              assert info['min_os_version'] == '1.5.0', info['min_os_version']
+
+              raw = package.extractfile('manifest.yml').read().decode()
+              m = yaml.safe_load(raw)
+              app = m['application']
+              assert app['subdomain'] == 'goatcounter', app['subdomain']
+              # own accounts, and the collection endpoint must be reachable too
+              assert app.get('public_path') == ['/'], app.get('public_path')
+              ups = app['upstreams']
+              assert any(u['location'] == '/' and 'goatcounter:8080' in (u.get('backend') or '')
+                         for u in ups), ups
+
+              svcs = m['services']
+              assert set(svcs) == {'goatcounter'}, set(svcs)
+              svc = svcs['goatcounter']
+              assert 'arp242/goatcounter' in svc['image'], svc['image']
+              assert svc['image'].endswith(':' + tag.lstrip('v')), svc['image']
+
+              env = ' '.join(str(x) for x in svc['environment'])
+              # Guard against reintroducing the invalid settings: neither of these
+              # is read by the application (they only appear in its help text), so
+              # carrying them would be silently ineffective configuration.
+              assert 'GOATCOUNTER_DOMAIN' not in raw, 'GOATCOUNTER_DOMAIN is not a real setting'
+              assert 'GOATCOUNTER_LISTEN' not in raw, 'GOATCOUNTER_LISTEN is only an example in help text'
+
+              binds = svc['binds']
+              # upstream's README names this volume as the one holding the db
+              assert any(b.endswith(':/home/goatcounter/goatcounter-data') for b in binds), binds
+              for b in binds:
+                  assert b.startswith('/lzcapp/var/'), b
+
+              params = yaml.safe_load(package.extractfile('deploy_params.yml').read())
+              assert params['params'] == [], params
+              refs = set(re.findall(r'\.U\.([A-Za-z0-9_]+)', raw))
+              assert refs == set(), ('unexpected deploy param refs', refs)
+
+              assert 'healthcheck' not in svc, svc
+              assert 'lzc-file-chooser' not in raw
+              assert 'docker.sock' not in raw
+              assert 'privileged' not in raw
+              assert 'usage' in m and str(m['usage']).strip(), 'usage section missing'
+              usage_text = str(m['usage'])
+              assert ('真机验证' in usage_text or '实机验证' in usage_text), 'usage must state no device test'
+              # the first account comes from the built-in setup wizard
+              assert '向导' in usage_text, 'usage should describe the setup wizard'
+
+              with tarfile.open(fileobj=package.extractfile('content.tar')) as content:
+                  cmembers = content.getnames()
+                  lic = [n for n in cmembers if 'licenses/' in n]
+                  assert lic, cmembers
+                  main_lic = [n for n in lic if n.endswith('/LICENSE')]
+                  target = main_lic[0] if main_lic else lic[0]
+                  license_text = content.extractfile(target).read().decode()
+                  flat = ' '.join(license_text.split())
+                  # the bundled file is the EUPL, written out in full
+                  assert 'European Union Public License' in flat, flat[:200]
+
+          result = {
+              'verified': True,
+              'tag': tag,
+              'sha256': h.hexdigest(),
+              'size': pkg.stat().st_size,
+              'runtime_tested': False,
+              'note': 'single container with sqlite; first site is created by the built-in setup wizard',
+          }
+          print(json.dumps(result))
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write('```json\n' + json.dumps(result, indent=2) + '\n```\n')
+          PY
