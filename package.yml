@@ -1,0 +1,18 @@
+package: community.lazycat.app.goatcounter
+name: GoatCounter
+version: 0.0.0
+description: "Privacy-friendly web analytics: no cookies, no personal data, just pageview counts and referrers."
+min_os_version: "1.5.0"
+homepage: https://www.goatcounter.com/
+author: Martin Tournoij
+license: EUPL-1.2
+permissions:
+  required:
+    - net.internet
+locales:
+  zh:
+    name: GoatCounter
+    description: "注重隐私的网站统计：不用 Cookie、不收集个人信息，只看访问量与来源。"
+  en:
+    name: GoatCounter
+    description: "Privacy-friendly web analytics: no cookies, no personal data, just pageview counts and referrers."
