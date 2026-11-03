@@ -78,11 +78,12 @@ jobs:
               assert svc['image'].endswith(':' + tag.lstrip('v')), svc['image']
 
               env = ' '.join(str(x) for x in svc['environment'])
-              # Guard against reintroducing the invalid settings: neither of these
-              # is read by the application (they only appear in its help text), so
-              # carrying them would be silently ineffective configuration.
-              assert 'GOATCOUNTER_DOMAIN' not in raw, 'GOATCOUNTER_DOMAIN is not a real setting'
-              assert 'GOATCOUNTER_LISTEN' not in raw, 'GOATCOUNTER_LISTEN is only an example in help text'
+              # Guard against reintroducing the invalid settings. Only the
+              # environment block is inspected: the comment above this block
+              # names them on purpose, and matching the whole file would trip
+              # over that comment.
+              assert 'GOATCOUNTER_DOMAIN' not in env, 'GOATCOUNTER_DOMAIN is not a real setting'
+              assert 'GOATCOUNTER_LISTEN' not in env, 'GOATCOUNTER_LISTEN is only an example in help text'
 
               binds = svc['binds']
               # upstream's README names this volume as the one holding the db
